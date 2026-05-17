@@ -14,10 +14,16 @@ class AttackConfig:
     k_ratio: float = 0.2
     lambda_match: float = 1.0
     lambda_offset: float = 1.0
+    lambda_cfg: float = 0.5
+    lambda_ms: float = 1.0
+    lambda_mg: float = 0.1
     beta_cd: float = 0.1
     gamma_knn: float = 0.1
     knn_k: int = 8
     proposal_temperature: float = 10.0
+    surface_constraint: bool = True
+    surface_fit_iters: int = 100
+    surface_fit_lr: float = 0.01
 
 
 def chamfer_distance(pc1: torch.Tensor, pc2: torch.Tensor) -> torch.Tensor:
@@ -37,7 +43,7 @@ def chamfer_distance(pc1: torch.Tensor, pc2: torch.Tensor) -> torch.Tensor:
 
 
 def compute_importance(features: torch.Tensor, loss: torch.Tensor) -> torch.Tensor:
-    """Compute per-point importance from feature gradients.
+    """Compute per-point importance from feature gradients (original my_attack).
 
     features: [B, C, N]
     returns: [B, N] normalized to [0,1]
@@ -50,6 +56,21 @@ def compute_importance(features: torch.Tensor, loss: torch.Tensor) -> torch.Tens
     scores = grads.norm(p=2, dim=1)
     max_vals = scores.max(dim=1, keepdim=True).values.clamp_min(1e-12)
     return scores / max_vals
+
+
+def compute_cfg_loss(features: torch.Tensor, loss: torch.Tensor) -> torch.Tensor:
+    """Compute CFG-ICCV2025 L_cfg = Σ |grad ⊙ feature|.
+
+    features: [B, C, N]
+    loss: scalar Tensor
+    returns: scalar L_cfg
+    """
+    grads = torch.autograd.grad(
+        loss, features, retain_graph=True, create_graph=False, allow_unused=True
+    )[0]
+    if grads is None:
+        return torch.tensor(0.0, device=features.device, dtype=features.dtype)
+    return (grads.abs() * features.detach().abs()).sum() * 0.01
 
 
 def select_critical_points(scores: torch.Tensor, k_ratio: float) -> torch.Tensor:
@@ -119,6 +140,137 @@ def _build_knn_reference(clean_points: torch.Tensor, k: int) -> Tuple[torch.Tens
     return knn_idx[:, :, 1:], knn_vals[:, :, 1:]
 
 
+# ------------------------------------------------------------------
+# Cheng 2025 surface-invariant constraint (Algorithm 1)
+# ------------------------------------------------------------------
+
+def _fit_surface_least_squares(points: torch.Tensor, iters: int = 100, lr: float = 0.01):
+    """Fit z = ax^2 + by^2 + cxy + dx + ey + f via analytic least squares (Cheng Alg.1, improved).
+
+    points: [M, 3] where M = 1 (center) + k (neighbors)
+    returns: parameter [6] = (a, b, c, d, e, f)
+    """
+    x = points[:, 0]
+    y = points[:, 1]
+    z = points[:, 2]
+    # Build design matrix: X = [x^2, y^2, xy, x, y, 1]
+    X = torch.stack([x ** 2, y ** 2, x * y, x, y, torch.ones_like(x)], dim=1)
+    try:
+        coeff = torch.linalg.lstsq(X, z).solution  # [6]
+        if torch.isnan(coeff).any() or torch.isinf(coeff).any() or coeff.abs().max() > 100.0:
+            raise ValueError("Unstable coefficients")
+    except Exception:
+        # Fallback to plane fit if singular or unstable
+        X_plane = torch.stack([x, y, torch.ones_like(x)], dim=1)
+        coeff_plane = torch.linalg.lstsq(X_plane, z).solution
+        if torch.isnan(coeff_plane).any() or torch.isinf(coeff_plane).any() or coeff_plane.abs().max() > 100.0:
+            # Very degenerate: just return constant z
+            coeff = torch.tensor([0.0, 0.0, 0.0, 0.0, 0.0, z.mean().item()],
+                                 device=points.device, dtype=points.dtype)
+        else:
+            coeff = torch.tensor([0.0, 0.0, 0.0, coeff_plane[0], coeff_plane[1], coeff_plane[2]],
+                                 device=points.device, dtype=points.dtype)
+    return coeff
+
+
+def _fit_surfaces_for_points(points: torch.Tensor, k: int = 8, iters: int = 100, lr: float = 0.01):
+    """Fit local quadratic surfaces for every point using its k-NN.
+
+    points: [N, 3]
+    returns: coeffs [N, 6]
+    """
+    N = points.shape[0]
+    dists = torch.cdist(points, points, p=2)
+    _, nn_idx = torch.topk(dists, k=k + 1, dim=-1, largest=False, sorted=True)
+    nn_idx = nn_idx[:, 1:]  # [N, k]
+
+    coeffs = torch.zeros(N, 6, device=points.device, dtype=points.dtype)
+    for i in range(N):
+        neigh = points[nn_idx[i]]  # [k, 3]
+        ps = torch.cat([points[i:i + 1], neigh], dim=0)  # [k+1, 3]
+        coeffs[i] = _fit_surface_least_squares(ps, iters=iters, lr=lr)
+    return coeffs
+
+
+def _apply_surface_constraint(delta, clean_search, critical_mask, surface_coeffs):
+    """Restrict z-perturbation so that perturbed point stays on fitted surface.
+
+    delta: [B, N, 3]
+    clean_search: [B, N, 3]
+    critical_mask: [B, N] bool
+    surface_coeffs: [B, N, 6]
+    """
+    bsz = delta.shape[0]
+    for b in range(bsz):
+        idx = critical_mask[b].nonzero(as_tuple=True)[0]
+        if idx.numel() == 0:
+            continue
+        x_new = clean_search[b, idx, 0] + delta[b, idx, 0]
+        y_new = clean_search[b, idx, 1] + delta[b, idx, 1]
+        coeff = surface_coeffs[b, idx]  # [K, 6]
+        a, bf, c, d, e, f = coeff[:, 0], coeff[:, 1], coeff[:, 2], coeff[:, 3], coeff[:, 4], coeff[:, 5]
+        z_target = a * x_new ** 2 + bf * y_new ** 2 + c * x_new * y_new + d * x_new + e * y_new + f
+        delta[b, idx, 2] = z_target - clean_search[b, idx, 2]
+    return delta
+
+
+# ------------------------------------------------------------------
+# Cheng 2025 Motion Loss
+# ------------------------------------------------------------------
+
+def _compute_motion_loss(
+    end_points: Dict[str, torch.Tensor],
+    c_gt: torch.Tensor,
+    B_prev: Optional[torch.Tensor] = None,
+    proposal_temperature: float = 10.0,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Compute Cheng motion-shift and motion-gap losses.
+
+    B_prev: [B, 7] = (cx, cy, cz, w, l, h, theta) previous frame box.
+    If None, return zero losses.
+    """
+    if B_prev is None:
+        return torch.tensor(0.0, device=c_gt.device), torch.tensor(0.0, device=c_gt.device)
+
+    boxes = end_points["estimation_boxes"]  # [B, K, 5]  (cx, cy, cz, ?, logit)
+    proposal_logits = boxes[:, :, 4]
+    proposal_weight = torch.softmax(proposal_logits * proposal_temperature, dim=1)
+    centers = boxes[:, :, :3]  # [B, K, 3]
+
+    bsz = boxes.shape[0]
+    K = boxes.shape[1]
+
+    # Motion definition: offset between previous and current center
+    # Simplified: we only use center offset since theta is not in boxes here
+    B_prev_center = B_prev[:, :3].unsqueeze(1)  # [B, 1, 3]
+    gt_center = c_gt.unsqueeze(1)  # [B, 1, 3]
+
+    # Motion of each proposal
+    motion_proposals = centers - B_prev_center  # [B, K, 3]
+    motion_gt = gt_center - B_prev_center  # [B, 1, 3]
+
+    # Motion-Shift Loss: deviate all proposals from GT motion
+    motion_error = (motion_proposals - motion_gt).norm(p=2, dim=-1)  # [B, K]
+    cs = proposal_weight  # [B, K]
+    L_ms = -(motion_error ** 2 * torch.log(1 - cs + 1e-8)).sum(dim=1).mean()
+
+    # Motion-Gap Loss: narrow gap between high-conf and low-conf proposals
+    q = max(1, K // 4)
+    r = max(1, K // 4)
+    top_idx = torch.topk(cs, k=q, dim=1, largest=True, sorted=False).indices
+    bot_idx = torch.topk(cs, k=r, dim=1, largest=False, sorted=False).indices
+
+    top_motions = torch.gather(motion_proposals, 1, top_idx.unsqueeze(-1).expand(-1, -1, 3))
+    bot_motions = torch.gather(motion_proposals, 1, bot_idx.unsqueeze(-1).expand(-1, -1, 3))
+    L_mg = (top_motions.mean(dim=1) - bot_motions.mean(dim=1)).norm(p=2, dim=-1).mean()
+
+    return L_ms, L_mg
+
+
+# ------------------------------------------------------------------
+# Original my_attack forward + tracking terms
+# ------------------------------------------------------------------
+
 def _forward_with_intermediate(model, input_dict: Dict[str, torch.Tensor]):
     """Forward for P2B/BAT while exposing search branch intermediate features."""
     template = input_dict["template_points"]
@@ -175,7 +327,7 @@ def _forward_with_intermediate(model, input_dict: Dict[str, torch.Tensor]):
             "vote_xyz": vote_xyz,
         }
 
-    return end_points, search_feature
+    return end_points, search_feature, fusion_feature
 
 
 def _compute_tracking_terms(
@@ -219,11 +371,13 @@ def main_attack_loop(
     c_gt: torch.Tensor,
     target_mask: torch.Tensor,
     attack_cfg: Optional[AttackConfig] = None,
+    B_prev: Optional[torch.Tensor] = None,
 ) -> Dict[str, torch.Tensor]:
     """Run critical feature guided attack on search point cloud.
 
     Required input_dict keys for P2B: template_points, search_points
     Optional BAT key: points2cc_dist_t
+    Optional: B_prev [B, 7] for Cheng motion loss.
     """
     if attack_cfg is None:
         attack_cfg = AttackConfig()
@@ -238,9 +392,22 @@ def main_attack_loop(
 
     knn_idx, clean_knn_dists = _build_knn_reference(clean_search, k=attack_cfg.knn_k)
 
+    # Pre-compute Cheng surface coefficients for ALL points (Algorithm 1)
+    surface_coeffs = None
+    if attack_cfg.surface_constraint:
+        surf_list = []
+        for b in range(clean_search.shape[0]):
+            coeffs_b = _fit_surfaces_for_points(
+                clean_search[b], k=8,
+                iters=attack_cfg.surface_fit_iters,
+                lr=attack_cfg.surface_fit_lr
+            )
+            surf_list.append(coeffs_b)
+        surface_coeffs = torch.stack(surf_list, dim=0)  # [B, N, 6]
+
     clean_eval_input = {k: (v.detach() if isinstance(v, torch.Tensor) else v) for k, v in input_dict.items()}
     with torch.no_grad():
-        clean_ep, _ = _forward_with_intermediate(model, clean_eval_input)
+        clean_ep, _, _ = _forward_with_intermediate(model, clean_eval_input)
         clean_score_gt, clean_c_pred, _, _ = _compute_tracking_terms(
             clean_ep, c_gt, target_mask, proposal_temperature=attack_cfg.proposal_temperature
         )
@@ -253,24 +420,53 @@ def main_attack_loop(
         adv_input = dict(input_dict)
         adv_input["search_points"] = adv_search
 
-        end_points, search_features = _forward_with_intermediate(model, adv_input)
+        end_points, search_features, fusion_features = _forward_with_intermediate(model, adv_input)
         score_gt, c_pred, sample_idxs, sampled_target_mask = _compute_tracking_terms(
             end_points, c_gt, target_mask, proposal_temperature=attack_cfg.proposal_temperature
         )
 
-        # Attack objective: suppress target response and increase center error.
+        # --------------------------------------------------------------
+        # 1. my_attack tracking losses
+        # --------------------------------------------------------------
         l_match = -score_gt.mean()
         l_offset = ((c_pred - c_gt).norm(p=2, dim=1)).mean()
         l_adv = attack_cfg.lambda_match * l_match + attack_cfg.lambda_offset * l_offset
 
+        # --------------------------------------------------------------
+        # 2. Cheng 2025 Motion Loss
+        # --------------------------------------------------------------
+        L_ms, L_mg = _compute_motion_loss(
+            end_points, c_gt, B_prev=B_prev,
+            proposal_temperature=attack_cfg.proposal_temperature
+        )
+
+        # --------------------------------------------------------------
+        # 3. Geometry constraints
+        # --------------------------------------------------------------
         l_cd = chamfer_distance(adv_search, clean_search).mean()
         l_knn = _knn_consistency_loss(adv_search, clean_search, knn_idx, clean_knn_dists)
 
-        objective = l_adv - attack_cfg.beta_cd * l_cd - attack_cfg.gamma_knn * l_knn
-
-        importance_sampled = compute_importance(search_features, objective)
+        # --------------------------------------------------------------
+        # 4. CFG gradient for importance + L_cfg
+        # --------------------------------------------------------------
+        importance_sampled = compute_importance(search_features, l_adv)
         n_orig = adv_search.shape[1]
         ns = importance_sampled.shape[1]
+
+        # L_cfg using fusion_feature (has valid gradient flow in BAT)
+        L_cfg = compute_cfg_loss(fusion_features, l_adv)
+
+        # --------------------------------------------------------------
+        # Final objective
+        # --------------------------------------------------------------
+        objective = (
+            l_adv
+            + attack_cfg.lambda_cfg * L_cfg
+            + attack_cfg.lambda_ms * L_ms
+            + attack_cfg.lambda_mg * L_mg
+            - attack_cfg.beta_cd * l_cd
+            - attack_cfg.gamma_knn * l_knn
+        )
 
         sampled_idx = sample_idxs[:, :ns]
         weights_orig = torch.zeros(adv_search.size(0), n_orig, device=device)
@@ -294,7 +490,6 @@ def main_attack_loop(
             objective, adv_search, retain_graph=False, create_graph=False, allow_unused=True
         )[0]
         if (grad_points is None) or (grad_points.abs().sum().item() < 1e-12):
-            # Input-grad fallback: move target points away from GT center.
             grad_points = F.normalize(adv_search - c_gt.unsqueeze(1), p=2, dim=-1, eps=1e-12)
 
         delta = attack_step(
@@ -309,12 +504,22 @@ def main_attack_loop(
         # Enforce perturbation only in target area.
         delta = delta * target_mask.unsqueeze(-1).float()
 
+        # --------------------------------------------------------------
+        # 5. Cheng 2025 surface-invariant hard constraint
+        # --------------------------------------------------------------
+        if attack_cfg.surface_constraint and surface_coeffs is not None:
+            delta = _apply_surface_constraint(delta, clean_search, critical_mask, surface_coeffs)
+            delta = torch.clamp(delta, min=-attack_cfg.eps, max=attack_cfg.eps)
+
         history.append(
             {
                 "step": step,
                 "l_adv": float(l_adv.detach().item()),
                 "l_match": float(l_match.detach().item()),
                 "l_offset": float(l_offset.detach().item()),
+                "L_cfg": float(L_cfg.detach().item()),
+                "L_ms": float(L_ms.detach().item()),
+                "L_mg": float(L_mg.detach().item()),
                 "l_cd": float(l_cd.detach().item()),
                 "l_knn": float(l_knn.detach().item()),
                 "score_gt": float(score_gt.mean().detach().item()),
@@ -327,7 +532,7 @@ def main_attack_loop(
     adv_eval_input["search_points"] = adv_search
 
     with torch.no_grad():
-        adv_ep, _ = _forward_with_intermediate(model, adv_eval_input)
+        adv_ep, _, _ = _forward_with_intermediate(model, adv_eval_input)
         adv_score_gt, adv_c_pred, _, _ = _compute_tracking_terms(
             adv_ep, c_gt, target_mask, proposal_temperature=attack_cfg.proposal_temperature
         )

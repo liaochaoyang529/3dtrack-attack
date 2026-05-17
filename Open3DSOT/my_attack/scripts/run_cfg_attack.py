@@ -44,6 +44,10 @@ def parse_args():
     parser.add_argument("--beta_cd", type=float, default=0.1)
     parser.add_argument("--gamma_knn", type=float, default=0.1)
     parser.add_argument("--knn_k", type=int, default=8)
+    parser.add_argument("--lambda_cfg", type=float, default=0.5)
+    parser.add_argument("--lambda_ms", type=float, default=1.0)
+    parser.add_argument("--lambda_mg", type=float, default=0.1)
+    parser.add_argument("--surface_constraint", action="store_true", default=False)
 
     parser.add_argument("--out_dir", type=str, default="/workspace/Open3DSOT/Open3DSOT/my_attack/outputs")
     parser.add_argument("--out_prefix", type=str, default="cfg_attack")
@@ -93,6 +97,14 @@ def main():
     cfg_data.update(vars(args))
     cfg_data.setdefault("preloading", False)
     cfg_data.setdefault("preload_offset", -1)
+    # Auto-select data path based on split
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(args.cfg)))
+    if args.split.lower() in ("valid", "val"):
+        cfg_data["path"] = os.path.join(base_dir, "val")
+    elif args.split.lower() in ("test", "testing"):
+        cfg_data["path"] = os.path.join(base_dir, "testing")
+    else:
+        cfg_data.setdefault("path", os.path.join(base_dir, "training"))
     cfg = EasyDict(cfg_data)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -113,9 +125,13 @@ def main():
         k_ratio=args.k_ratio,
         lambda_match=args.lambda_match,
         lambda_offset=args.lambda_offset,
+        lambda_cfg=args.lambda_cfg,
+        lambda_ms=args.lambda_ms,
+        lambda_mg=args.lambda_mg,
         beta_cd=args.beta_cd,
         gamma_knn=args.gamma_knn,
         knn_k=args.knn_k,
+        surface_constraint=args.surface_constraint,
     )
 
     result = main_attack_loop(
