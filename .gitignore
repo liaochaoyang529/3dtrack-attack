@@ -1,0 +1,71 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs and outputs
+lightning_logs/
+outputs/
+output/
+.cache/
+
+# Model checkpoints and weights
+*.pth
+*.ckpt
+*.pkl
+*.pt
+
+# VS Code Python extension artifacts (unrelated to research code)
+vscode-python-2026.4.0/
+
+# Datasets - do not commit large/local data
+**/data/
+**/datasets/
+**/dataset/
+**/ModelNet40/
+**/kitti/
+**/waymo/
+**/nuscenes/
+**/KITTI/
+**/Waymo/
+**/nuScenes/
+
+# Large generated/run directories
+**/testing/
+**/training/
+**/val/
+**/outputs/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Coverage
+htmlcov/
+.coverage
+
+# Project meta files (agent instructions)
+/AGENTS.md
+/CLAUDE.md
