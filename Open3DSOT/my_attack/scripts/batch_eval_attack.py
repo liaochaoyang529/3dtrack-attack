@@ -38,10 +38,10 @@ def parse_args():
 
     parser.add_argument("--eps", type=float, default=0.05)
     parser.add_argument("--alpha", type=float, default=0.005)
-    parser.add_argument("--iters", type=int, default=20)
+    parser.add_argument("--iters", type=int, default=80)
     parser.add_argument("--k_ratio", type=float, default=0.2)
-    parser.add_argument("--lambda_match", type=float, default=1.0)
-    parser.add_argument("--lambda_offset", type=float, default=1.0)
+    parser.add_argument("--lambda_match", type=float, default=0.0)
+    parser.add_argument("--lambda_offset", type=float, default=5.0)
     parser.add_argument("--lambda_cfg", type=float, default=0.5)
     parser.add_argument("--beta_cd", type=float, default=0.1)
     parser.add_argument("--gamma_knn", type=float, default=0.1)
