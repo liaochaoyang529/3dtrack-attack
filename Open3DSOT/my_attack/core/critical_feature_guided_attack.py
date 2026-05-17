@@ -9,11 +9,11 @@ import torch.nn.functional as F
 @dataclass
 class AttackConfig:
     eps: float = 0.05
-    alpha: float = 0.005          # kept for backward compat; not used by Adam
-    iters: int = 80               # Adam needs more iterations than PGD
+    alpha: float = 0.005
+    iters: int = 20
     k_ratio: float = 0.2
-    lambda_match: float = 0.0     # disable score suppression (conflicts with center error on BAT)
-    lambda_offset: float = 5.0    # focus on center error attack
+    lambda_match: float = 1.0
+    lambda_offset: float = 1.0
     lambda_cfg: float = 0.5
     lambda_ms: float = 1.0
     lambda_mg: float = 0.1
@@ -21,13 +21,9 @@ class AttackConfig:
     gamma_knn: float = 0.1
     knn_k: int = 8
     proposal_temperature: float = 10.0
-    surface_constraint: bool = False  # disabled by default; enable only with Adam + correct lr schedule
+    surface_constraint: bool = True
     surface_fit_iters: int = 100
     surface_fit_lr: float = 0.01
-    # Adam optimizer settings (tuned for effective 80-iteration window)
-    lr: float = 0.01
-    lr_decay_step: int = 20       # slower decay: effective window extended to ~80 iters
-    lr_decay_gamma: float = 0.5   # milder decay: lr drops from 0.01 -> 0.00125 over 80 iters
 
 
 def chamfer_distance(pc1: torch.Tensor, pc2: torch.Tensor) -> torch.Tensor:
@@ -377,7 +373,7 @@ def main_attack_loop(
     attack_cfg: Optional[AttackConfig] = None,
     B_prev: Optional[torch.Tensor] = None,
 ) -> Dict[str, torch.Tensor]:
-    """Run critical feature guided attack on search point cloud (Adam version).
+    """Run critical feature guided attack on search point cloud.
 
     Required input_dict keys for P2B: template_points, search_points
     Optional BAT key: points2cc_dist_t
@@ -392,16 +388,7 @@ def main_attack_loop(
     target_mask = target_mask.to(device).bool()
 
     clean_search = input_dict["search_points"].detach()
-
-    # Cheng 2025: randomly initialize perturbation from normal distribution
     delta = torch.zeros_like(clean_search)
-    delta = delta.normal_(mean=0, std=1e-3)
-    delta.requires_grad_(True)
-
-    optimizer = torch.optim.Adam([delta], lr=attack_cfg.lr, maximize=True)
-    scheduler = torch.optim.lr_scheduler.StepLR(
-        optimizer, step_size=attack_cfg.lr_decay_step, gamma=attack_cfg.lr_decay_gamma
-    )
 
     knn_idx, clean_knn_dists = _build_knn_reference(clean_search, k=attack_cfg.knn_k)
 
@@ -429,7 +416,7 @@ def main_attack_loop(
     history = []
 
     for step in range(attack_cfg.iters):
-        adv_search = clean_search + delta
+        adv_search = (clean_search + delta).detach().requires_grad_(True)
         adv_input = dict(input_dict)
         adv_input["search_points"] = adv_search
 
@@ -481,13 +468,12 @@ def main_attack_loop(
             - attack_cfg.gamma_knn * l_knn
         )
 
-        # Select critical points for surface constraint (same logic as before)
         sampled_idx = sample_idxs[:, :ns]
         weights_orig = torch.zeros(adv_search.size(0), n_orig, device=device)
         for b in range(adv_search.size(0)):
             weights_orig[b, sampled_idx[b]] = importance_sampled[b]
 
-        # Fallback when feature-gradient importance is degenerate
+        # Fallback when feature-gradient importance is degenerate: use sampled score magnitude.
         if weights_orig.abs().sum().item() < 1e-12:
             score_fallback = torch.sigmoid(end_points["estimation_cla"]).detach()
             for b in range(adv_search.size(0)):
@@ -498,25 +484,32 @@ def main_attack_loop(
             weights_orig = target_mask.float()
 
         critical_mask = select_critical_points(weights_orig, attack_cfg.k_ratio)
+        attack_weights = weights_orig * critical_mask.float()
 
-        optimizer.zero_grad()
-        objective.backward()
-        optimizer.step()
-        scheduler.step()
+        grad_points = torch.autograd.grad(
+            objective, adv_search, retain_graph=False, create_graph=False, allow_unused=True
+        )[0]
+        if (grad_points is None) or (grad_points.abs().sum().item() < 1e-12):
+            grad_points = F.normalize(adv_search - c_gt.unsqueeze(1), p=2, dim=-1, eps=1e-12)
+
+        delta = attack_step(
+            points=adv_search,
+            gradients=grad_points,
+            weights=attack_weights,
+            alpha=attack_cfg.alpha,
+            eps=attack_cfg.eps,
+            delta=delta,
+        )
+
+        # Enforce perturbation only in target area.
+        delta = delta * target_mask.unsqueeze(-1).float()
 
         # --------------------------------------------------------------
-        # Hard projections after Adam step (non-differentiable)
+        # 5. Cheng 2025 surface-invariant hard constraint
         # --------------------------------------------------------------
-        with torch.no_grad():
-            # 1. Only target area
-            delta.data = delta.data * target_mask.unsqueeze(-1).float()
-
-            # 2. Cheng 2025 surface-invariant hard constraint
-            if attack_cfg.surface_constraint and surface_coeffs is not None:
-                delta.data = _apply_surface_constraint(delta.data, clean_search, critical_mask, surface_coeffs)
-
-            # 3. Epsilon clip (L∞)
-            delta.data = torch.clamp(delta.data, min=-attack_cfg.eps, max=attack_cfg.eps)
+        if attack_cfg.surface_constraint and surface_coeffs is not None:
+            delta = _apply_surface_constraint(delta, clean_search, critical_mask, surface_coeffs)
+            delta = torch.clamp(delta, min=-attack_cfg.eps, max=attack_cfg.eps)
 
         history.append(
             {
@@ -530,12 +523,11 @@ def main_attack_loop(
                 "l_cd": float(l_cd.detach().item()),
                 "l_knn": float(l_knn.detach().item()),
                 "score_gt": float(score_gt.mean().detach().item()),
-                "delta_linf": float(delta.data.abs().max().item()),
-                "lr": scheduler.get_last_lr()[0],
+                "delta_linf": float(delta.detach().abs().max().item()),
             }
         )
 
-    adv_search = (clean_search + delta.detach())
+    adv_search = (clean_search + delta).detach()
     adv_eval_input = {k: (v.detach() if isinstance(v, torch.Tensor) else v) for k, v in input_dict.items()}
     adv_eval_input["search_points"] = adv_search
 
@@ -548,7 +540,7 @@ def main_attack_loop(
 
     out = {
         "S_adv": adv_search,
-        "delta": delta.detach(),
+        "delta": delta,
         "clean_score_gt": clean_score_gt,
         "adv_score_gt": adv_score_gt,
         "score_drop": clean_score_gt - adv_score_gt,
