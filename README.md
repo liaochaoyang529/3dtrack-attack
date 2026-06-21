@@ -39,39 +39,110 @@ Keep datasets, checkpoints, generated adversarial examples, and logs outside ver
 
 ## Environment
 
-The local experiments were run from a `uv`-managed virtual environment. A CUDA-capable GPU is expected for practical attack runs.
+The experiments in this workspace were run from the AutoDL `uv` virtual environment at the repository root:
 
-Recommended setup with `uv`:
-
-```bash
-# Install uv if it is not available yet.
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# From the repository root:
-cd /path/to/3dtrack-attack
-uv venv .venv --python 3.8
-source .venv/bin/activate
-
-cd Open3DSOT
-uv pip install -r requirement.txt
+```text
+/workspace/Open3DSOT/.venv
 ```
 
-Install a PyTorch build that matches your CUDA driver before or after the requirements step if your environment does not already provide one. For example, choose the correct command from the PyTorch installation selector for your CUDA version, then install the remaining requirements with `uv pip install -r requirement.txt`.
+Current environment snapshot:
 
-If the PointNet++ op from `requirement.txt` fails to install from GitHub, build the vendored source inside the same `uv` environment:
+```text
+uv: 0.9.9
+Python: 3.8.20
+Python executable: /workspace/Open3DSOT/.venv/bin/python
+pip module: not installed in the venv; use uv pip
+torch: 2.3.0+cu121
+CUDA used by torch: 12.1
+GPU visible to torch: yes, 1 device
+pytorch-lightning: 1.3.8
+torchmetrics: 0.4.1
+pointnet2_ops: 3.0.0
+numpy: 1.24.4
+scipy: 1.10.1
+pandas: 1.1.5
+protobuf: 5.29.5
+pomegranate: 0.14.8
+pyquaternion: 0.9.9
+Shapely: 1.7.1
+tensorboard: 2.14.0
+nuscenes-devkit: 1.1.9
+PyYAML: 6.0.3
+```
+
+To reproduce the same style of environment on AutoDL, create the venv from the repository root and install packages with `uv pip`:
 
 ```bash
-cd /path/to/3dtrack-attack/Open3DSOT/Pointnet2_PyTorch/pointnet2_ops_lib
+cd /workspace/Open3DSOT
+uv venv .venv --python 3.8.20
+source .venv/bin/activate
+```
+
+Install PyTorch CUDA 12.1 wheels first:
+
+```bash
+uv pip install \
+  torch==2.3.0 torchvision==0.18.0 \
+  --index-url https://download.pytorch.org/whl/cu121
+```
+
+Then install the Open3DSOT/runtime dependencies. The checked-in `Open3DSOT/requirement.txt` is the original project requirement file; this workspace uses newer compatible versions for several packages, so install the known working core set explicitly:
+
+```bash
+uv pip install \
+  easydict==1.9 \
+  numpy==1.24.4 \
+  pandas==1.1.5 \
+  scipy==1.10.1 \
+  protobuf==5.29.5 \
+  pomegranate==0.14.8 \
+  pyquaternion==0.9.9 \
+  pytorch-lightning==1.3.8 \
+  torchmetrics==0.4.1 \
+  PyYAML==6.0.3 \
+  Shapely==1.7.1 \
+  tensorboard==2.14.0 \
+  tqdm==4.61.1 \
+  nuscenes-devkit==1.1.9 \
+  scikit-learn==1.3.2 \
+  matplotlib==3.7.5 \
+  open3d==0.19.0
+```
+
+Build the vendored PointNet++ CUDA op inside the same `uv` environment:
+
+```bash
+cd /workspace/Open3DSOT/Open3DSOT/Pointnet2_PyTorch/pointnet2_ops_lib
 uv pip install -e .
 ```
 
 Then return to the project root for all experiment commands:
 
 ```bash
-cd /path/to/3dtrack-attack/Open3DSOT
+cd /workspace/Open3DSOT/Open3DSOT
 ```
 
-Conda can also work, but the documented/reproduced setup for this workspace is the `uv` environment above.
+Quick environment check:
+
+```bash
+/workspace/Open3DSOT/.venv/bin/python - <<PY
+import torch
+import pytorch_lightning
+import torchmetrics
+import numpy
+import scipy
+import pandas
+import pointnet2_ops
+
+print("torch", torch.__version__, "cuda", torch.version.cuda, "available", torch.cuda.is_available())
+print("pytorch_lightning", pytorch_lightning.__version__)
+print("torchmetrics", torchmetrics.__version__)
+print("numpy", numpy.__version__, "scipy", scipy.__version__, "pandas", pandas.__version__)
+print("pointnet2_ops", pointnet2_ops.__version__)
+PY
+```
+
+Conda can also work, but the documented/reproduced setup for this workspace is the AutoDL `uv` environment above.
 
 ## Data And Checkpoints
 
