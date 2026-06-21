@@ -1,0 +1,211 @@
+{
+  "args": {
+    "records_jsonl": "Open3DSOT/my_attack/outputs/ppo_teacher_success_stealth/records.jsonl",
+    "output": "Open3DSOT/my_attack/outputs/point_ranker_bc_1024_e10/best.pt",
+    "epochs": 10,
+    "batch_size": 4,
+    "workers": 2,
+    "lr": 0.0003,
+    "weight_decay": 0.0001,
+    "temperature": 2.0,
+    "edge_k": 12,
+    "max_points": 0,
+    "val_ratio": 0.1,
+    "test_ratio": 0.1,
+    "seed": 0,
+    "require_success": true,
+    "max_stealth_score": 0.25,
+    "grad_clip": 1.0,
+    "limit_train": 0,
+    "limit_val": 0,
+    "limit_test": 0
+  },
+  "split_sizes": {
+    "train": 41940,
+    "val": 3611,
+    "test": 2997
+  },
+  "history": [
+    {
+      "epoch": 1,
+      "train": {
+        "loss": 0.41782148364957106,
+        "top1": 0.1337386742966142
+      },
+      "val": {
+        "loss": 0.3675538358956625,
+        "top1": 0.20991415120465245,
+        "top3": 0.2658543339795071,
+        "regret": 2.6683720182230255,
+        "selected_success": 0.8521185267238992,
+        "selected_stealth": 0.06106037239507203,
+        "oracle_success": 1.0,
+        "oracle_stealth": 0.08145242212306666
+      }
+    },
+    {
+      "epoch": 2,
+      "train": {
+        "loss": 0.41700090324607425,
+        "top1": 0.1514067715784454
+      },
+      "val": {
+        "loss": 0.3671903884132725,
+        "top1": 0.1675436167266685,
+        "top3": 0.23096095264469677,
+        "regret": 2.67143723971954,
+        "selected_success": 0.8518415951260039,
+        "selected_stealth": 0.06351466963891776,
+        "oracle_success": 1.0,
+        "oracle_stealth": 0.08145242212306666
+      }
+    },
+    {
+      "epoch": 3,
+      "train": {
+        "loss": 0.4166669142893509,
+        "top1": 0.146828803051979
+      },
+      "val": {
+        "loss": 0.36678476353456807,
+        "top1": 0.1354195513708114,
+        "top3": 0.17751315425090003,
+        "regret": 2.6552927138170883,
+        "selected_success": 0.8576571586818056,
+        "selected_stealth": 0.09674953690755037,
+        "oracle_success": 1.0,
+        "oracle_stealth": 0.08145242212306666
+      }
+    },
+    {
+      "epoch": 4,
+      "train": {
+        "loss": 0.4162776776098699,
+        "top1": 0.13538388173581306
+      },
+      "val": {
+        "loss": 0.3663697676045541,
+        "top1": 0.1592356687898089,
+        "top3": 0.19579063971199115,
+        "regret": 2.6881534607580115,
+        "selected_success": 0.8571032954860149,
+        "selected_stealth": 0.10173281423654798,
+        "oracle_success": 1.0,
+        "oracle_stealth": 0.08145242212306666
+      }
+    },
+    {
+      "epoch": 5,
+      "train": {
+        "loss": 0.41599025911561394,
+        "top1": 0.14008106819265617
+      },
+      "val": {
+        "loss": 0.366606363139962,
+        "top1": 0.19329825533093326,
+        "top3": 0.2287454998615342,
+        "regret": 2.6004241081328643,
+        "selected_success": 0.8604264746607588,
+        "selected_stealth": 0.08297033419354659,
+        "oracle_success": 1.0,
+        "oracle_stealth": 0.08145242212306666
+      }
+    },
+    {
+      "epoch": 6,
+      "train": {
+        "loss": 0.4159958329992382,
+        "top1": 0.13371483071053886
+      },
+      "val": {
+        "loss": 0.3664503905105107,
+        "top1": 0.16809747992245916,
+        "top3": 0.23040708944890612,
+        "regret": 2.490486197840042,
+        "selected_success": 0.8665189698144559,
+        "selected_stealth": 0.08781199855484911,
+        "oracle_success": 1.0,
+        "oracle_stealth": 0.08145242212306666
+      }
+    },
+    {
+      "epoch": 7,
+      "train": {
+        "loss": 0.41570590612583813,
+        "top1": 0.13786361468764902
+      },
+      "val": {
+        "loss": 0.3667869265814116,
+        "top1": 0.11741899750761561,
+        "top3": 0.16698975353087786,
+        "regret": 2.6922821072916747,
+        "selected_success": 0.8559955690944336,
+        "selected_stealth": 0.1020779288062777,
+        "oracle_success": 1.0,
+        "oracle_stealth": 0.08145242212306666
+      }
+    },
+    {
+      "epoch": 8,
+      "train": {
+        "loss": 0.4156025379596826,
+        "top1": 0.13640915593705294
+      },
+      "val": {
+        "loss": 0.3666065029698836,
+        "top1": 0.1800055386319579,
+        "top3": 0.22514538908889503,
+        "regret": 2.7546344694751874,
+        "selected_success": 0.8535031847133758,
+        "selected_stealth": 0.0932635445334994,
+        "oracle_success": 1.0,
+        "oracle_stealth": 0.08145242212306666
+      }
+    },
+    {
+      "epoch": 9,
+      "train": {
+        "loss": 0.41539454767569317,
+        "top1": 0.12491654744873629
+      },
+      "val": {
+        "loss": 0.36574753918057,
+        "top1": 0.17169759069509832,
+        "top3": 0.21379119357518692,
+        "regret": 2.498275122197504,
+        "selected_success": 0.8687344225976183,
+        "selected_stealth": 0.10009355996331751,
+        "oracle_success": 1.0,
+        "oracle_stealth": 0.08145242212306666
+      }
+    },
+    {
+      "epoch": 10,
+      "train": {
+        "loss": 0.4154283348817785,
+        "top1": 0.13500238435860754
+      },
+      "val": {
+        "loss": 0.3659110822766706,
+        "top1": 0.17695929105510938,
+        "top3": 0.23539185821102188,
+        "regret": 2.55077818403347,
+        "selected_success": 0.8618111326502353,
+        "selected_stealth": 0.08529130997113271,
+        "oracle_success": 1.0,
+        "oracle_stealth": 0.08145242212306666
+      }
+    }
+  ],
+  "best_val_loss": 0.36574753918057,
+  "test": {
+    "loss": 0.3902487805188398,
+    "top1": 0.14748081414748082,
+    "top3": 0.1871871871871872,
+    "regret": 2.723595861995622,
+    "selected_success": 0.8601935268601936,
+    "selected_stealth": 0.0988168335795678,
+    "oracle_success": 1.0,
+    "oracle_stealth": 0.0776731792034398
+  }
+}
