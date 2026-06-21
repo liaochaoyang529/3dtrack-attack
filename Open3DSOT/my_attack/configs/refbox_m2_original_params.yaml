@@ -1,0 +1,44 @@
+enabled: true
+attack_search_only: true
+attack_after_sampling: true
+enhanced_search_only: true
+critical_patch_search: true
+directional_fake_points: false
+local_patch_shift: true
+drift_mode: true
+
+seed: 0
+max_noise_steps: 100
+recovery_steps: 50
+recovery_keep_ratio: 0.4
+iou_failure_threshold: 0.06
+center_error_failure_threshold: 1.5
+score_failure_threshold: null
+
+noise_types:
+  - jitter
+  - density
+  - patch_shift
+
+jitter_std_max: 0.08
+drop_ratio_max: 0.0
+fake_ratio_max: 0.0
+density_ratio_max: 0.15
+patch_shift_max: 0.2
+patch_ratio: 0.15
+density_radius: 0.6
+fake_box_scale: 1.2
+local_density_k: 8
+num_patches: 8
+patch_candidate_k: 4
+max_fake_points: 0
+max_drop_ratio: 0.0
+patch_shift_range: 0.2
+random_seed_stride: 1009
+save_adv_npz: true
+
+candidate_directions:
+  - "+x"
+  - "-x"
+  - "+y"
+  - "-y"
