@@ -11,8 +11,8 @@ seed: 0
 max_noise_steps: 100
 recovery_steps: 50
 recovery_keep_ratio: 0.4
-iou_failure_threshold: 0.06
-center_error_failure_threshold: 1.5
+iou_failure_threshold: 0.01
+center_error_failure_threshold: 4.0
 score_failure_threshold: null
 
 noise_types:

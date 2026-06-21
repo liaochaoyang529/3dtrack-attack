@@ -41,6 +41,10 @@ def parse_args():
     parser.add_argument("--k_ratio", type=float, default=0.2)
     parser.add_argument("--lambda_match", type=float, default=0.0)
     parser.add_argument("--lambda_offset", type=float, default=5.0)
+    parser.add_argument("--lambda_pseudo_offset", type=float, default=5.0)
+    parser.add_argument("--lambda_best_suppress", type=float, default=1.0)
+    parser.add_argument("--lambda_margin", type=float, default=0.5)
+    parser.add_argument("--lambda_score_suppress", type=float, default=0.5)
     parser.add_argument("--lambda_cfg", type=float, default=0.5)
     parser.add_argument("--lambda_ms", type=float, default=1.0)
     parser.add_argument("--lambda_mg", type=float, default=0.1)
@@ -49,8 +53,11 @@ def parse_args():
     parser.add_argument("--knn_k", type=int, default=8)
     parser.add_argument("--surface_constraint", action="store_true", default=False)
     parser.add_argument("--lr", type=float, default=0.01)
-    parser.add_argument("--lr_decay_step", type=int, default=20)
-    parser.add_argument("--lr_decay_gamma", type=float, default=0.5)
+    parser.add_argument("--lr_decay_step", type=int, default=5)
+    parser.add_argument("--lr_decay_gamma", type=float, default=0.2)
+    parser.add_argument("--pred_mask_threshold", type=float, default=0.5)
+    parser.add_argument("--pred_mask_min_points", type=int, default=1)
+    parser.add_argument("--use_gt_objective", action="store_true", default=False)
 
     parser.add_argument("--out_json", type=str, default="/workspace/Open3DSOT/Open3DSOT/my_attack/outputs/attacked_full_metrics.json")
     return parser.parse_args()
@@ -118,18 +125,15 @@ def evaluate_one_sequence_attacked(model, sequence, attack_cfg: AttackConfig):
             data_dict, ref_bb = model.build_input_dict(sequence, frame_id, results_bbs)
             c_gt, target_mask = _build_target_from_gt(data_dict, this_bb, ref_bb, model.device)
 
-            if target_mask.sum().item() > 0:
-                attacked = main_attack_loop(
-                    model=model,
-                    input_dict=data_dict,
-                    c_gt=c_gt,
-                    target_mask=target_mask,
-                    attack_cfg=attack_cfg,
-                )
-                data_dict_adv = dict(data_dict)
-                data_dict_adv["search_points"] = attacked["S_adv"].detach()
-            else:
-                data_dict_adv = data_dict
+            attacked = main_attack_loop(
+                model=model,
+                input_dict=data_dict,
+                c_gt=c_gt,
+                target_mask=target_mask,
+                attack_cfg=attack_cfg,
+            )
+            data_dict_adv = dict(data_dict)
+            data_dict_adv["search_points"] = attacked["S_adv"].detach()
 
             with torch.no_grad():
                 candidate_box = model.evaluate_one_sample(data_dict_adv, ref_box=ref_bb)
@@ -169,6 +173,10 @@ def main():
         k_ratio=args.k_ratio,
         lambda_match=args.lambda_match,
         lambda_offset=args.lambda_offset,
+        lambda_pseudo_offset=args.lambda_pseudo_offset,
+        lambda_best_suppress=args.lambda_best_suppress,
+        lambda_margin=args.lambda_margin,
+        lambda_score_suppress=args.lambda_score_suppress,
         lambda_cfg=args.lambda_cfg,
         lambda_ms=args.lambda_ms,
         lambda_mg=args.lambda_mg,
@@ -179,6 +187,9 @@ def main():
         lr=args.lr,
         lr_decay_step=args.lr_decay_step,
         lr_decay_gamma=args.lr_decay_gamma,
+        pred_mask_threshold=args.pred_mask_threshold,
+        pred_mask_min_points=args.pred_mask_min_points,
+        use_gt_objective=args.use_gt_objective,
     )
 
     success_clean = TorchSuccess()
@@ -218,6 +229,10 @@ def main():
             "k_ratio": args.k_ratio,
             "lambda_match": args.lambda_match,
             "lambda_offset": args.lambda_offset,
+            "lambda_pseudo_offset": args.lambda_pseudo_offset,
+            "lambda_best_suppress": args.lambda_best_suppress,
+            "lambda_margin": args.lambda_margin,
+            "lambda_score_suppress": args.lambda_score_suppress,
             "lambda_cfg": args.lambda_cfg,
             "beta_cd": args.beta_cd,
             "gamma_knn": args.gamma_knn,
@@ -226,6 +241,9 @@ def main():
             "lr": args.lr,
             "lr_decay_step": args.lr_decay_step,
             "lr_decay_gamma": args.lr_decay_gamma,
+            "pred_mask_threshold": args.pred_mask_threshold,
+            "pred_mask_min_points": args.pred_mask_min_points,
+            "use_gt_objective": args.use_gt_objective,
         },
         "cfg": args.cfg,
         "checkpoint": args.checkpoint,

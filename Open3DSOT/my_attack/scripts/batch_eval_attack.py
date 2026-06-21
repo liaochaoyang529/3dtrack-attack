@@ -42,10 +42,17 @@ def parse_args():
     parser.add_argument("--k_ratio", type=float, default=0.2)
     parser.add_argument("--lambda_match", type=float, default=0.0)
     parser.add_argument("--lambda_offset", type=float, default=5.0)
+    parser.add_argument("--lambda_pseudo_offset", type=float, default=5.0)
+    parser.add_argument("--lambda_best_suppress", type=float, default=1.0)
+    parser.add_argument("--lambda_margin", type=float, default=0.5)
+    parser.add_argument("--lambda_score_suppress", type=float, default=0.5)
     parser.add_argument("--lambda_cfg", type=float, default=0.5)
     parser.add_argument("--beta_cd", type=float, default=0.1)
     parser.add_argument("--gamma_knn", type=float, default=0.1)
     parser.add_argument("--knn_k", type=int, default=8)
+    parser.add_argument("--pred_mask_threshold", type=float, default=0.5)
+    parser.add_argument("--pred_mask_min_points", type=int, default=1)
+    parser.add_argument("--use_gt_objective", action="store_true", default=False)
     parser.add_argument("--surface_constraint", action="store_true", default=False)
 
     parser.add_argument("--out_dir", type=str, default="/workspace/Open3DSOT/Open3DSOT/my_attack/outputs")
@@ -120,10 +127,17 @@ def main():
         k_ratio=args.k_ratio,
         lambda_match=args.lambda_match,
         lambda_offset=args.lambda_offset,
+        lambda_pseudo_offset=args.lambda_pseudo_offset,
+        lambda_best_suppress=args.lambda_best_suppress,
+        lambda_margin=args.lambda_margin,
+        lambda_score_suppress=args.lambda_score_suppress,
         lambda_cfg=args.lambda_cfg,
         beta_cd=args.beta_cd,
         gamma_knn=args.gamma_knn,
         knn_k=args.knn_k,
+        pred_mask_threshold=args.pred_mask_threshold,
+        pred_mask_min_points=args.pred_mask_min_points,
+        use_gt_objective=args.use_gt_objective,
         surface_constraint=args.surface_constraint,
     )
 

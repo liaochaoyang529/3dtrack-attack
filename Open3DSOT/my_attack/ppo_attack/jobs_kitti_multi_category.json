@@ -1,0 +1,22 @@
+{
+  "jobs": [
+    {
+      "name": "bat_kitti_car",
+      "cfg": "Open3DSOT/cfgs/BAT_Car.yaml",
+      "checkpoint": "Open3DSOT/pretrained_models/bat_kitti_car.ckpt",
+      "attack_cfg": "Open3DSOT/my_attack/configs/progressive_diffusion_attack.yaml",
+      "path": "/workspace/Open3DSOT/Open3DSOT/training",
+      "category_name": "Car",
+      "tracker_name": "BAT"
+    },
+    {
+      "name": "bat_kitti_pedestrian",
+      "cfg": "Open3DSOT/cfgs/BAT_Pedestrian.yaml",
+      "checkpoint": "Open3DSOT/pretrained_models/bat_kitti_pedestrian.ckpt",
+      "attack_cfg": "Open3DSOT/my_attack/configs/progressive_diffusion_attack.yaml",
+      "path": "/workspace/Open3DSOT/Open3DSOT/training",
+      "category_name": "Pedestrian",
+      "tracker_name": "BAT"
+    }
+  ]
+}

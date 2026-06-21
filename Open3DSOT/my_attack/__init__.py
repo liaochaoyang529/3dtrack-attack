@@ -6,6 +6,10 @@ from .core.critical_feature_guided_attack import (
     main_attack_loop,
     select_critical_points,
 )
+from .core.progressive_diffusion_attack import (
+    ProgressiveAttackConfig,
+    run_progressive_attack,
+)
 
 __all__ = [
     "AttackConfig",
@@ -14,4 +18,6 @@ __all__ = [
     "attack_step",
     "chamfer_distance",
     "main_attack_loop",
+    "ProgressiveAttackConfig",
+    "run_progressive_attack",
 ]

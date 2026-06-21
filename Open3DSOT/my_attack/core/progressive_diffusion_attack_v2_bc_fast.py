@@ -220,6 +220,11 @@ def run_bc_guided_progressive_attack_fast(
     stealth_penalty_weight: float = 10.0,
     regularization_mode: str = "random",
     batch_tracker_eval_fn: Optional[Callable[[List[Dict[str, torch.Tensor]]], List[Dict]]] = None,
+    reward_early_stop: bool = False,
+    reward_lambda_iou: float = 10.0,
+    reward_patience: int = 8,
+    reward_min_improvement: float = 0.01,
+    reward_warmup_steps: int = 0,
 ) -> Dict:
     """与 ``run_bc_guided_progressive_attack`` 行为等价的提速版本。
 
@@ -272,6 +277,13 @@ def run_bc_guided_progressive_attack_fast(
         "patch_id": None,
         "reference_mode": reference_mode,
     }
+    reward_stop = bc._make_reward_early_stop_state(
+        reward_early_stop,
+        reward_lambda_iou,
+        reward_patience,
+        reward_min_improvement,
+        reward_warmup_steps,
+    )
 
     for step_id in range(cfg.max_noise_steps):
         candidates = teacher_export.generate_candidates(
@@ -325,6 +337,12 @@ def run_bc_guided_progressive_attack_fast(
             failure_metrics = copy.deepcopy(best_metrics)
             failure_step = step_id + 1
             break
+        bc._update_reward_early_stop(reward_stop, best_metrics, step_id + 1)
+        stats["reward"] = reward_stop.get("last_reward")
+        stats["best_reward"] = reward_stop.get("best_reward")
+        stats["reward_stale_steps"] = reward_stop.get("stale_steps")
+        if reward_stop["stopped"]:
+            break
 
     if failure_state is None:
         best_eval_state = best_eval_state if "best_eval_state" in locals() and best_eval_state is not None else clean_eval_state
@@ -350,6 +368,7 @@ def run_bc_guided_progressive_attack_fast(
             "full_candidate_query_count": int(full_candidate_query_count),
             "query_saving_ratio": 1.0 - float(query_count) / float(max(1, full_candidate_query_count)),
             "query_stats": query_stats,
+            "reward_early_stop": bc._reward_early_stop_summary(reward_stop),
             "stealth_constraints": {
                 "target_fake_point_ratio": target_fake_point_ratio,
                 "target_removed_point_ratio": target_removed_point_ratio,
@@ -432,6 +451,7 @@ def run_bc_guided_progressive_attack_fast(
         "full_candidate_query_count": int(full_candidate_query_count),
         "query_saving_ratio": 1.0 - float(query_count) / float(max(1, full_candidate_query_count)),
         "query_stats": query_stats,
+        "reward_early_stop": bc._reward_early_stop_summary(reward_stop),
         "stealth_constraints": {
             "target_fake_point_ratio": target_fake_point_ratio,
             "target_removed_point_ratio": target_removed_point_ratio,

@@ -133,6 +133,16 @@ def parse_args() -> argparse.Namespace:
         default=False,
         help="候选攻击排序时禁用 tracker score，只使用 no-GT reference IoU/center error。",
     )
+    parser.add_argument(
+        "--reward_early_stop",
+        action="store_true",
+        default=False,
+        help="Enable optional reward-plateau early stop without changing hard attack_success logic.",
+    )
+    parser.add_argument("--reward_lambda_iou", type=float, default=10.0)
+    parser.add_argument("--reward_patience", type=int, default=8)
+    parser.add_argument("--reward_min_improvement", type=float, default=0.01)
+    parser.add_argument("--reward_warmup_steps", type=int, default=0)
     return parser.parse_args()
 
 
@@ -164,6 +174,8 @@ def evaluate_sequences(args, model, dataset, attack_cfg, selector, device):
     fair_adv_center_values: List[float] = []
     selected_ops: Dict[str, int] = {}
     recovery_used = 0
+    reward_early_stop_used = 0
+    reward_early_stop_steps: List[int] = []
     query_count = 0
     full_candidate_query_count = 0
     attack_success_count = 0
@@ -259,6 +271,11 @@ def evaluate_sequences(args, model, dataset, attack_cfg, selector, device):
                         target_changed_point_ratio=args.max_changed_point_ratio,
                         stealth_penalty_weight=args.stealth_penalty_weight,
                         regularization_mode=args.regularization_mode,
+                        reward_early_stop=args.reward_early_stop,
+                        reward_lambda_iou=args.reward_lambda_iou,
+                        reward_patience=args.reward_patience,
+                        reward_min_improvement=args.reward_min_improvement,
+                        reward_warmup_steps=args.reward_warmup_steps,
                     )
                 else:
                     tracker_eval_fn = _make_clean_reference_eval_fn(
@@ -277,6 +294,11 @@ def evaluate_sequences(args, model, dataset, attack_cfg, selector, device):
                         target_changed_point_ratio=args.max_changed_point_ratio,
                         stealth_penalty_weight=args.stealth_penalty_weight,
                         regularization_mode=args.regularization_mode,
+                        reward_early_stop=args.reward_early_stop,
+                        reward_lambda_iou=args.reward_lambda_iou,
+                        reward_patience=args.reward_patience,
+                        reward_min_improvement=args.reward_min_improvement,
+                        reward_warmup_steps=args.reward_warmup_steps,
                     )
                 adv_gt_metrics, adv_box = _evaluate_input_against_gt_for_logging(
                     model, attack_result["adv_input"], gt_box, adv_ref_bb, disable_score=args.disable_score
@@ -293,6 +315,11 @@ def evaluate_sequences(args, model, dataset, attack_cfg, selector, device):
                 op = str(selected.get("attack_type", "unknown"))
                 selected_ops[op] = selected_ops.get(op, 0) + 1
                 recovery_used += int(any(log.get("stage") == "bc_recovery" for log in attack_result.get("logs", [])))
+                reward_stop = attack_result.get("reward_early_stop", {}) or {}
+                if reward_stop.get("stopped"):
+                    reward_early_stop_used += 1
+                    if reward_stop.get("step") is not None:
+                        reward_early_stop_steps.append(int(reward_stop["step"]))
 
                 seq_clean_ious.append(float(clean_gt_metrics["iou"]))
                 seq_adv_ious.append(float(adv_gt_metrics["iou"]))
@@ -316,6 +343,7 @@ def evaluate_sequences(args, model, dataset, attack_cfg, selector, device):
                     "full_candidate_query_count": int(attack_result.get("full_candidate_query_count", 0)),
                     "query_saving_ratio": float(attack_result.get("query_saving_ratio", 0.0)),
                     "query_stats": attack_result.get("query_stats", []),
+                    "reward_early_stop": attack_result.get("reward_early_stop", {}),
                     "clean_selection_metrics": attack_result.get("clean_metrics", {}),
                     "best_attack_metrics": attack_result.get("best_metrics", {}),
                     "selected_candidate": selected,
@@ -349,6 +377,15 @@ def evaluate_sequences(args, model, dataset, attack_cfg, selector, device):
         "fair_attack_success_rate_nogt": fair_attack_success_count / max(1, len(fair_clean_iou_values)),
         "selected_ops": selected_ops,
         "recovery_used_frames": recovery_used,
+        "reward_early_stop_frames": reward_early_stop_used,
+        "reward_early_stop_mean_step": _mean(reward_early_stop_steps),
+        "reward_early_stop_config": {
+            "enabled": bool(args.reward_early_stop),
+            "lambda_iou": float(args.reward_lambda_iou),
+            "patience": int(args.reward_patience),
+            "min_improvement": float(args.reward_min_improvement),
+            "warmup_steps": int(args.reward_warmup_steps),
+        },
         "query_count": query_count,
         "full_candidate_query_count": full_candidate_query_count,
         "query_saving_ratio": 1.0 - float(query_count) / float(max(1, full_candidate_query_count)),
@@ -456,6 +493,11 @@ def main() -> None:
         "disable_drop_ops": args.disable_drop_ops,
         "disable_score": args.disable_score,
         "regularization_mode": args.regularization_mode,
+        "reward_early_stop": args.reward_early_stop,
+        "reward_lambda_iou": args.reward_lambda_iou,
+        "reward_patience": args.reward_patience,
+        "reward_min_improvement": args.reward_min_improvement,
+        "reward_warmup_steps": args.reward_warmup_steps,
         "fast": args.fast,
         "attack": attack_cfg.to_dict(),
         **metrics,
@@ -472,6 +514,7 @@ def main() -> None:
     print(f"BC adv precision:       {summary['bc_adv_precision']:.6f}")
     print(f"Precision drop:         {summary['precision_drop']:.6f}")
     print(f"No-GT attack rate:      {summary['attack_success_rate_nogt']:.6f}")
+    print(f"Reward early stops:    {summary['reward_early_stop_frames']}")
     print(f"Query count:            {summary['query_count']}")
     print(f"Full candidate queries: {summary['full_candidate_query_count']}")
     print(f"Query saving ratio:     {summary['query_saving_ratio']:.6f}")

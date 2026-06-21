@@ -3,7 +3,6 @@ from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 import torch
-import torch.nn.functional as F
 
 
 @dataclass
@@ -14,6 +13,10 @@ class AttackConfig:
     k_ratio: float = 0.2
     lambda_match: float = 0.0     # disable score suppression (conflicts with center error on BAT)
     lambda_offset: float = 5.0    # focus on center error attack
+    lambda_pseudo_offset: float = 5.0
+    lambda_best_suppress: float = 1.0
+    lambda_margin: float = 0.5
+    lambda_score_suppress: float = 0.5
     lambda_cfg: float = 0.5
     lambda_ms: float = 1.0
     lambda_mg: float = 0.1
@@ -21,13 +24,16 @@ class AttackConfig:
     gamma_knn: float = 0.1
     knn_k: int = 8
     proposal_temperature: float = 10.0
+    pred_mask_threshold: float = 0.5
+    pred_mask_min_points: int = 1
+    use_gt_objective: bool = False
     surface_constraint: bool = False  # disabled by default; enable only with Adam + correct lr schedule
     surface_fit_iters: int = 100
     surface_fit_lr: float = 0.01
-    # Adam optimizer settings (tuned for effective 80-iteration window)
+    # Adam optimizer settings (Cheng 2025 original)
     lr: float = 0.01
-    lr_decay_step: int = 20       # slower decay: effective window extended to ~80 iters
-    lr_decay_gamma: float = 0.5   # milder decay: lr drops from 0.01 -> 0.00125 over 80 iters
+    lr_decay_step: int = 5        # Cheng original: decay every 5 iters
+    lr_decay_gamma: float = 0.2   # Cheng original: aggressive decay to 20% each time
 
 
 def chamfer_distance(pc1: torch.Tensor, pc2: torch.Tensor) -> torch.Tensor:
@@ -63,7 +69,10 @@ def compute_importance(features: torch.Tensor, loss: torch.Tensor) -> torch.Tens
 
 
 def compute_cfg_loss(features: torch.Tensor, loss: torch.Tensor) -> torch.Tensor:
-    """Compute CFG-ICCV2025 L_cfg = Σ |grad ⊙ feature|.
+    """Compute CFG-ICCV2025 L_cfg = sum(|grad * feature|).
+
+    The feature saliency gradient is treated as a fixed weight, matching the
+    original CFG-style objective while avoiding second-order gradients.
 
     features: [B, C, N]
     loss: scalar Tensor
@@ -74,7 +83,7 @@ def compute_cfg_loss(features: torch.Tensor, loss: torch.Tensor) -> torch.Tensor
     )[0]
     if grads is None:
         return torch.tensor(0.0, device=features.device, dtype=features.dtype)
-    return (grads.abs() * features.detach().abs()).sum() * 0.01
+    return (grads.detach().abs() * features.abs()).sum() * 0.01
 
 
 def select_critical_points(scores: torch.Tensor, k_ratio: float) -> torch.Tensor:
@@ -84,7 +93,7 @@ def select_critical_points(scores: torch.Tensor, k_ratio: float) -> torch.Tensor
     returns: bool mask [B, N]
     """
     bsz, n = scores.shape
-    k = max(1, int(round(n * k_ratio)))
+    k = min(n, max(1, int(round(n * k_ratio))))
     topk_idx = torch.topk(scores, k=k, dim=1, largest=True, sorted=False).indices
     mask = torch.zeros_like(scores, dtype=torch.bool)
     mask.scatter_(1, topk_idx, True)
@@ -127,6 +136,8 @@ def _knn_consistency_loss(
     """
     bsz, n, _ = adv_points.shape
     k = knn_idx.shape[-1]
+    if k == 0:
+        return adv_points.new_tensor(0.0)
 
     gather_idx = knn_idx.unsqueeze(-1).expand(bsz, n, k, 3)
     adv_neighbors = torch.gather(
@@ -139,6 +150,12 @@ def _knn_consistency_loss(
 
 def _build_knn_reference(clean_points: torch.Tensor, k: int) -> Tuple[torch.Tensor, torch.Tensor]:
     # Exclude self-neighbor by taking topk+1 and dropping the first.
+    bsz, n, _ = clean_points.shape
+    if n < 2:
+        empty_idx = torch.empty(bsz, n, 0, device=clean_points.device, dtype=torch.long)
+        empty_dists = clean_points.new_empty(bsz, n, 0)
+        return empty_idx, empty_dists
+    k = min(max(1, k), n - 1)
     pair = torch.cdist(clean_points, clean_points, p=2)
     knn_vals, knn_idx = torch.topk(pair, k=k + 1, dim=-1, largest=False, sorted=True)
     return knn_idx[:, :, 1:], knn_vals[:, :, 1:]
@@ -184,6 +201,12 @@ def _fit_surfaces_for_points(points: torch.Tensor, k: int = 8, iters: int = 100,
     returns: coeffs [N, 6]
     """
     N = points.shape[0]
+    if N < 2:
+        coeffs = torch.zeros(N, 6, device=points.device, dtype=points.dtype)
+        if N == 1:
+            coeffs[0, 5] = points[0, 2]
+        return coeffs
+    k = min(max(1, k), N - 1)
     dists = torch.cdist(points, points, p=2)
     _, nn_idx = torch.topk(dists, k=k + 1, dim=-1, largest=False, sorted=True)
     nn_idx = nn_idx[:, 1:]  # [N, k]
@@ -258,7 +281,8 @@ def _compute_motion_loss(
     cs = proposal_weight  # [B, K]
     L_ms = -(motion_error ** 2 * torch.log(1 - cs + 1e-8)).sum(dim=1).mean()
 
-    # Motion-Gap Loss: narrow gap between high-conf and low-conf proposals
+    # Motion-Gap Loss: distance between high-conf and low-conf proposal motions.
+    # The caller subtracts this term when the objective is maximized, narrowing the gap.
     q = max(1, K // 4)
     r = max(1, K // 4)
     top_idx = torch.topk(cs, k=q, dim=1, largest=True, sorted=False).indices
@@ -359,6 +383,54 @@ def _compute_tracking_terms(
     return score_gt, c_pred, sample_idxs, sampled_target_mask
 
 
+def _gather_best_proposal_terms(
+    end_points: Dict[str, torch.Tensor],
+    best_idx: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Gather proposal terms aligned with evaluate_one_sample argmax decoding."""
+    boxes = end_points["estimation_boxes"]
+    logits = boxes[:, :, 4]
+    gather_idx = best_idx.view(-1, 1, 1)
+    best_boxes = boxes.gather(1, gather_idx.expand(-1, 1, boxes.shape[-1])).squeeze(1)
+    best_center = best_boxes[:, :3]
+    best_logit = best_boxes[:, 4]
+
+    if logits.shape[1] > 1:
+        top2 = torch.topk(logits, k=2, dim=1, largest=True).values
+        margin = top2[:, 0] - top2[:, 1]
+    else:
+        margin = logits.new_zeros(logits.shape[0])
+
+    return best_center, best_logit, margin, logits
+
+
+def _build_predicted_target_mask(
+    end_points: Dict[str, torch.Tensor],
+    n_orig: int,
+    threshold: float = 0.5,
+    min_points: int = 1,
+) -> torch.Tensor:
+    """Build an original-point attack mask from the tracker's own foreground scores."""
+    score_map = end_points["estimation_cla"]
+    if score_map.dim() == 3 and score_map.shape[-1] == 1:
+        score_map = score_map.squeeze(-1)
+    ns = score_map.shape[1]
+    sample_idxs = end_points["sample_idxs"][:, :ns].long()
+    score_prob = torch.sigmoid(score_map)
+    sampled_mask = score_prob >= threshold
+
+    min_points = max(1, min(min_points, ns))
+    not_enough = sampled_mask.sum(dim=1) < min_points
+    if not_enough.any():
+        top_idx = torch.topk(score_prob[not_enough], k=min_points, dim=1, largest=True).indices
+        sampled_mask[not_enough] = False
+        sampled_mask[not_enough].scatter_(1, top_idx, True)
+
+    pred_mask = torch.zeros(score_map.size(0), n_orig, device=score_map.device, dtype=torch.bool)
+    pred_mask.scatter_(1, sample_idxs, sampled_mask)
+    return pred_mask
+
+
 def _to_device_batch(batch: Dict[str, torch.Tensor], device: torch.device) -> Dict[str, torch.Tensor]:
     out = {}
     for k, v in batch.items():
@@ -376,12 +448,14 @@ def main_attack_loop(
     target_mask: torch.Tensor,
     attack_cfg: Optional[AttackConfig] = None,
     B_prev: Optional[torch.Tensor] = None,
+    ref_box=None,
 ) -> Dict[str, torch.Tensor]:
     """Run critical feature guided attack on search point cloud (Adam version).
 
     Required input_dict keys for P2B: template_points, search_points
     Optional BAT key: points2cc_dist_t
     Optional: B_prev [B, 7] for Cheng motion loss.
+    Optional: ref_box (BBox) for mapping delta back to global (Velodyne) coords.
     """
     if attack_cfg is None:
         attack_cfg = AttackConfig()
@@ -389,6 +463,8 @@ def main_attack_loop(
     device = next(model.parameters()).device
     input_dict = _to_device_batch(input_dict, device)
     c_gt = c_gt.to(device).float()
+    # Kept for API compatibility with existing scripts; the attack region below
+    # is derived from the tracker's clean prediction instead of GT seg_label.
     target_mask = target_mask.to(device).bool()
 
     clean_search = input_dict["search_points"].detach()
@@ -411,7 +487,7 @@ def main_attack_loop(
         surf_list = []
         for b in range(clean_search.shape[0]):
             coeffs_b = _fit_surfaces_for_points(
-                clean_search[b], k=8,
+                clean_search[b], k=attack_cfg.knn_k,
                 iters=attack_cfg.surface_fit_iters,
                 lr=attack_cfg.surface_fit_lr
             )
@@ -421,8 +497,19 @@ def main_attack_loop(
     clean_eval_input = {k: (v.detach() if isinstance(v, torch.Tensor) else v) for k, v in input_dict.items()}
     with torch.no_grad():
         clean_ep, _, _ = _forward_with_intermediate(model, clean_eval_input)
+        clean_logits = clean_ep["estimation_boxes"][:, :, 4]
+        clean_best_idx = clean_logits.argmax(dim=1)
+        clean_best_center, clean_best_logit, clean_margin, _ = _gather_best_proposal_terms(
+            clean_ep, clean_best_idx
+        )
+        attack_mask = _build_predicted_target_mask(
+            clean_ep,
+            n_orig=clean_search.shape[1],
+            threshold=attack_cfg.pred_mask_threshold,
+            min_points=attack_cfg.pred_mask_min_points,
+        )
         clean_score_gt, clean_c_pred, _, _ = _compute_tracking_terms(
-            clean_ep, c_gt, target_mask, proposal_temperature=attack_cfg.proposal_temperature
+            clean_ep, c_gt, attack_mask, proposal_temperature=attack_cfg.proposal_temperature
         )
         clean_center_error = (clean_c_pred - c_gt).norm(p=2, dim=1)
 
@@ -435,15 +522,36 @@ def main_attack_loop(
 
         end_points, search_features, fusion_features = _forward_with_intermediate(model, adv_input)
         score_gt, c_pred, sample_idxs, sampled_target_mask = _compute_tracking_terms(
-            end_points, c_gt, target_mask, proposal_temperature=attack_cfg.proposal_temperature
+            end_points, c_gt, attack_mask, proposal_temperature=attack_cfg.proposal_temperature
         )
 
         # --------------------------------------------------------------
         # 1. my_attack tracking losses
         # --------------------------------------------------------------
-        l_match = -score_gt.mean()
-        l_offset = ((c_pred - c_gt).norm(p=2, dim=1)).mean()
-        l_adv = attack_cfg.lambda_match * l_match + attack_cfg.lambda_offset * l_offset
+        best_center, best_logit, proposal_margin, proposal_logits = _gather_best_proposal_terms(
+            end_points, clean_best_idx
+        )
+        l_score_suppress = -score_gt.mean()
+        l_best_suppress = -best_logit.mean()
+        l_margin_confuse = -proposal_margin.mean()
+        l_pseudo_offset = (best_center - clean_best_center).norm(p=2, dim=1).mean()
+
+        # Optional legacy supervised objective for ablations only. The default
+        # attack objective does not use GT center or GT segmentation.
+        l_gt_offset = ((c_pred - c_gt).norm(p=2, dim=1)).mean()
+        if attack_cfg.use_gt_objective:
+            l_match = l_score_suppress
+            l_offset = l_gt_offset
+            l_adv = attack_cfg.lambda_match * l_match + attack_cfg.lambda_offset * l_offset
+        else:
+            l_match = l_score_suppress
+            l_offset = l_pseudo_offset
+            l_adv = (
+                attack_cfg.lambda_pseudo_offset * l_pseudo_offset
+                + attack_cfg.lambda_best_suppress * l_best_suppress
+                + attack_cfg.lambda_margin * l_margin_confuse
+                + attack_cfg.lambda_score_suppress * l_score_suppress
+            )
 
         # --------------------------------------------------------------
         # 2. Cheng 2025 Motion Loss
@@ -476,12 +584,12 @@ def main_attack_loop(
             l_adv
             + attack_cfg.lambda_cfg * L_cfg
             + attack_cfg.lambda_ms * L_ms
-            + attack_cfg.lambda_mg * L_mg
+            - attack_cfg.lambda_mg * L_mg
             - attack_cfg.beta_cd * l_cd
             - attack_cfg.gamma_knn * l_knn
         )
 
-        # Select critical points for surface constraint (same logic as before)
+        # Select critical points and use their normalized importance as the update gate.
         sampled_idx = sample_idxs[:, :ns]
         weights_orig = torch.zeros(adv_search.size(0), n_orig, device=device)
         for b in range(adv_search.size(0)):
@@ -493,14 +601,23 @@ def main_attack_loop(
             for b in range(adv_search.size(0)):
                 weights_orig[b, sampled_idx[b]] = score_fallback[b]
 
-        weights_orig = weights_orig * target_mask.float()
+        weights_orig = weights_orig * attack_mask.float()
         if weights_orig.abs().sum().item() < 1e-12:
-            weights_orig = target_mask.float()
+            weights_orig = attack_mask.float()
 
         critical_mask = select_critical_points(weights_orig, attack_cfg.k_ratio)
+        critical_mask = critical_mask & attack_mask
+        empty_critical = ~critical_mask.any(dim=1)
+        if empty_critical.any():
+            critical_mask[empty_critical] = attack_mask[empty_critical]
+        attack_weights = weights_orig * critical_mask.float()
+        weight_max = attack_weights.amax(dim=1, keepdim=True).clamp_min(1e-12)
+        attack_weights = attack_weights / weight_max
 
         optimizer.zero_grad()
         objective.backward()
+        if delta.grad is not None:
+            delta.grad.mul_(attack_weights.unsqueeze(-1))
         optimizer.step()
         scheduler.step()
 
@@ -508,8 +625,8 @@ def main_attack_loop(
         # Hard projections after Adam step (non-differentiable)
         # --------------------------------------------------------------
         with torch.no_grad():
-            # 1. Only target area
-            delta.data = delta.data * target_mask.unsqueeze(-1).float()
+            # 1. Only critical target points are allowed to carry perturbation.
+            delta.data = delta.data * critical_mask.unsqueeze(-1).float()
 
             # 2. Cheng 2025 surface-invariant hard constraint
             if attack_cfg.surface_constraint and surface_coeffs is not None:
@@ -524,13 +641,22 @@ def main_attack_loop(
                 "l_adv": float(l_adv.detach().item()),
                 "l_match": float(l_match.detach().item()),
                 "l_offset": float(l_offset.detach().item()),
+                "l_gt_offset": float(l_gt_offset.detach().item()),
+                "l_pseudo_offset": float(l_pseudo_offset.detach().item()),
+                "l_best_suppress": float(l_best_suppress.detach().item()),
+                "l_margin_confuse": float(l_margin_confuse.detach().item()),
+                "l_score_suppress": float(l_score_suppress.detach().item()),
                 "L_cfg": float(L_cfg.detach().item()),
                 "L_ms": float(L_ms.detach().item()),
                 "L_mg": float(L_mg.detach().item()),
                 "l_cd": float(l_cd.detach().item()),
                 "l_knn": float(l_knn.detach().item()),
                 "score_gt": float(score_gt.mean().detach().item()),
+                "best_logit": float(best_logit.mean().detach().item()),
+                "proposal_margin": float(proposal_margin.mean().detach().item()),
                 "delta_linf": float(delta.data.abs().max().item()),
+                "pred_mask_ratio": float(attack_mask.float().mean().item()),
+                "critical_ratio": float(critical_mask.float().mean().item()),
                 "lr": scheduler.get_last_lr()[0],
             }
         )
@@ -541,8 +667,11 @@ def main_attack_loop(
 
     with torch.no_grad():
         adv_ep, _, _ = _forward_with_intermediate(model, adv_eval_input)
+        adv_best_center, adv_best_logit, adv_margin, _ = _gather_best_proposal_terms(
+            adv_ep, clean_best_idx
+        )
         adv_score_gt, adv_c_pred, _, _ = _compute_tracking_terms(
-            adv_ep, c_gt, target_mask, proposal_temperature=attack_cfg.proposal_temperature
+            adv_ep, c_gt, attack_mask, proposal_temperature=attack_cfg.proposal_temperature
         )
         adv_center_error = (adv_c_pred - c_gt).norm(p=2, dim=1)
 
@@ -555,8 +684,27 @@ def main_attack_loop(
         "clean_center_error": clean_center_error,
         "adv_center_error": adv_center_error,
         "center_error_increase": adv_center_error - clean_center_error,
+        "clean_best_idx": clean_best_idx.detach(),
+        "clean_best_logit": clean_best_logit.detach(),
+        "adv_clean_best_logit": adv_best_logit.detach(),
+        "clean_best_margin": clean_margin.detach(),
+        "adv_clean_best_margin": adv_margin.detach(),
+        "clean_best_center_shift": (adv_best_center - clean_best_center).norm(p=2, dim=1).detach(),
+        "attack_mask": attack_mask.detach(),
         "history": history,
     }
+
+    # Map delta from local search coord system back to global (Velodyne) coords
+    if ref_box is not None:
+        R = ref_box.rotation_matrix  # (3, 3)
+        R_t = torch.from_numpy(R).float().to(device)
+        # search_points are in local coords: p_local = R^T @ (p_global - t)
+        # For row-vector representation [B, N, 3]: delta_global = delta_local @ R^T
+        delta_global = torch.matmul(delta.detach(), R_t.T.unsqueeze(0))  # [B, N, 3]
+        out["delta_global"] = delta_global
+    else:
+        out["delta_global"] = None
+
     return out
 
 
@@ -568,6 +716,13 @@ def dump_attack_report(path: str, result: Dict[str, torch.Tensor]) -> None:
         "clean_center_error": result["clean_center_error"].detach().cpu().tolist(),
         "adv_center_error": result["adv_center_error"].detach().cpu().tolist(),
         "center_error_increase": result["center_error_increase"].detach().cpu().tolist(),
+        "clean_best_idx": result["clean_best_idx"].detach().cpu().tolist(),
+        "clean_best_logit": result["clean_best_logit"].detach().cpu().tolist(),
+        "adv_clean_best_logit": result["adv_clean_best_logit"].detach().cpu().tolist(),
+        "clean_best_margin": result["clean_best_margin"].detach().cpu().tolist(),
+        "adv_clean_best_margin": result["adv_clean_best_margin"].detach().cpu().tolist(),
+        "clean_best_center_shift": result["clean_best_center_shift"].detach().cpu().tolist(),
+        "attack_mask_count": result["attack_mask"].sum(dim=1).detach().cpu().tolist(),
         "history": result["history"],
     }
     with open(path, "w", encoding="utf-8") as f:

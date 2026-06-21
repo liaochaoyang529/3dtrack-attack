@@ -57,6 +57,9 @@ def parse_args():
     parser.add_argument('--beta_cd', type=float, default=0.1)
     parser.add_argument('--gamma_knn', type=float, default=0.1)
     parser.add_argument('--knn_k', type=int, default=8)
+    parser.add_argument('--lr', type=float, default=0.01)
+    parser.add_argument('--lr_decay_step', type=int, default=20)
+    parser.add_argument('--lr_decay_gamma', type=float, default=0.5)
 
     parser.add_argument('--out_json', type=str, default='my_attack/outputs/cross_model_bb.json')
     return parser.parse_args()
@@ -112,13 +115,16 @@ def attack_current_frame_with_bat(bat_model, curr_xyz, prev_xyz, cfg_bat, device
         alpha=args.alpha,
         iters=args.iters,
         k_ratio=args.k_ratio,
-        lambda_match=1.0,
-        lambda_offset=1.0,
+        lambda_match=0.0,
+        lambda_offset=5.0,
         lambda_cfg=args.lambda_cfg,
         beta_cd=args.beta_cd,
         gamma_knn=args.gamma_knn,
         knn_k=args.knn_k,
         surface_constraint=False,
+        lr=args.lr,
+        lr_decay_step=args.lr_decay_step,
+        lr_decay_gamma=args.lr_decay_gamma,
     )
 
     result = main_attack_loop(

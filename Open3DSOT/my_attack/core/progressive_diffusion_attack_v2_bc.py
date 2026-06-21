@@ -24,6 +24,68 @@ ProgressiveAttackConfig = base.ProgressiveAttackConfig
 TrackerInputAdapter = base.TrackerInputAdapter
 
 
+def _reward_from_metrics(metrics: Dict, lambda_iou: float) -> float:
+    iou = float(metrics.get("iou", 1.0) or 0.0)
+    center_error = float(metrics.get("center_error", 0.0) or 0.0)
+    return center_error + float(lambda_iou) * (1.0 - iou)
+
+
+def _make_reward_early_stop_state(
+    enabled: bool,
+    lambda_iou: float,
+    patience: int,
+    min_improvement: float,
+    warmup_steps: int,
+) -> Dict:
+    return {
+        "enabled": bool(enabled),
+        "lambda_iou": float(lambda_iou),
+        "patience": max(1, int(patience)),
+        "min_improvement": float(min_improvement),
+        "warmup_steps": max(0, int(warmup_steps)),
+        "best_reward": -float("inf"),
+        "last_reward": None,
+        "stale_steps": 0,
+        "stopped": False,
+        "reason": None,
+        "step": None,
+    }
+
+
+def _update_reward_early_stop(state: Dict, metrics: Dict, step: int) -> None:
+    reward = _reward_from_metrics(metrics, state["lambda_iou"])
+    state["last_reward"] = float(reward)
+    if reward > float(state["best_reward"]) + float(state["min_improvement"]):
+        state["best_reward"] = float(reward)
+        state["stale_steps"] = 0
+    else:
+        state["stale_steps"] = int(state["stale_steps"]) + 1
+    if int(step) < int(state["warmup_steps"]):
+        state["stale_steps"] = 0
+        return
+    if state["enabled"] and int(state["stale_steps"]) >= int(state["patience"]):
+        state["stopped"] = True
+        state["reason"] = "reward_plateau"
+        state["step"] = int(step)
+
+
+def _reward_early_stop_summary(state: Dict) -> Dict:
+    best_reward = None if state["best_reward"] == -float("inf") else float(state["best_reward"])
+    return {
+        "enabled": bool(state["enabled"]),
+        "stopped": bool(state["stopped"]),
+        "reason": state.get("reason"),
+        "step": state.get("step"),
+        "best_reward": best_reward,
+        "last_reward": state.get("last_reward"),
+        "stale_steps": int(state["stale_steps"]),
+        "lambda_iou": float(state["lambda_iou"]),
+        "patience": int(state["patience"]),
+        "min_improvement": float(state["min_improvement"]),
+        "warmup_steps": int(state["warmup_steps"]),
+    }
+
+
 def _state_numpy(state: CloudState) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     return (
         state.points.detach().cpu().numpy(),
@@ -500,6 +562,11 @@ def run_bc_guided_progressive_attack(
     target_changed_point_ratio: Optional[float] = None,
     stealth_penalty_weight: float = 10.0,
     regularization_mode: str = "random",
+    reward_early_stop: bool = False,
+    reward_lambda_iou: float = 10.0,
+    reward_patience: int = 8,
+    reward_min_improvement: float = 0.01,
+    reward_warmup_steps: int = 0,
 ) -> Dict:
     if reference_mode not in ("gt", "nogt"):
         raise ValueError("reference_mode must be 'gt' or 'nogt'.")
@@ -544,6 +611,13 @@ def run_bc_guided_progressive_attack(
         "patch_id": None,
         "reference_mode": reference_mode,
     }
+    reward_stop = _make_reward_early_stop_state(
+        reward_early_stop,
+        reward_lambda_iou,
+        reward_patience,
+        reward_min_improvement,
+        reward_warmup_steps,
+    )
 
     for step_id in range(cfg.max_noise_steps):
         candidates = teacher_export.generate_candidates(
@@ -601,6 +675,12 @@ def run_bc_guided_progressive_attack(
             failure_metrics = copy.deepcopy(best_metrics)
             failure_step = step_id + 1
             break
+        _update_reward_early_stop(reward_stop, best_metrics, step_id + 1)
+        stats["reward"] = reward_stop.get("last_reward")
+        stats["best_reward"] = reward_stop.get("best_reward")
+        stats["reward_stale_steps"] = reward_stop.get("stale_steps")
+        if reward_stop["stopped"]:
+            break
 
     if failure_state is None:
         best_eval_state = best_eval_state if "best_eval_state" in locals() and best_eval_state is not None else clean_eval_state
@@ -626,6 +706,7 @@ def run_bc_guided_progressive_attack(
             "full_candidate_query_count": int(full_candidate_query_count),
             "query_saving_ratio": 1.0 - float(query_count) / float(max(1, full_candidate_query_count)),
             "query_stats": query_stats,
+            "reward_early_stop": _reward_early_stop_summary(reward_stop),
             "stealth_constraints": {
                 "target_fake_point_ratio": target_fake_point_ratio,
                 "target_removed_point_ratio": target_removed_point_ratio,
@@ -715,6 +796,7 @@ def run_bc_guided_progressive_attack(
         "full_candidate_query_count": int(full_candidate_query_count),
         "query_saving_ratio": 1.0 - float(query_count) / float(max(1, full_candidate_query_count)),
         "query_stats": query_stats,
+        "reward_early_stop": _reward_early_stop_summary(reward_stop),
         "stealth_constraints": {
             "target_fake_point_ratio": target_fake_point_ratio,
             "target_removed_point_ratio": target_removed_point_ratio,

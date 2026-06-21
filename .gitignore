@@ -41,9 +41,9 @@ output/
 # VS Code Python extension artifacts (unrelated to research code)
 vscode-python-2026.4.0/
 
-# Datasets - do not commit large/local data
+# Datasets - do not commit large/local data.
+# Keep source packages such as Open3DSOT/datasets tracked.
 **/data/
-**/datasets/
 **/dataset/
 **/ModelNet40/
 **/kitti/
@@ -58,6 +58,22 @@ vscode-python-2026.4.0/
 **/training/
 **/val/
 **/outputs/
+**/pretrained_models/
+**/lightning_logs/
+**/occam_results*/
+**/temp_cuda_extract/
+**/Pointnet2_PyTorch/pointnet2_ops_lib/build/
+**/Pointnet2_PyTorch/pointnet2_ops_lib/*.egg-info/
+
+# Research notes, local exports, and generated figures
+/chat*.md
+/conversation_export*.md
+/*.pdf
+/=
+Open3DSOT/2026-*-command-message*.txt
+Open3DSOT/CODEX_HANDOFF*.md
+Open3DSOT/my_attack/backups/
+Open3DSOT/my_attack/figure/
 
 # Jupyter
 .ipynb_checkpoints/
