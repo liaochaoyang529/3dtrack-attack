@@ -39,34 +39,39 @@ Keep datasets, checkpoints, generated adversarial examples, and logs outside ver
 
 ## Environment
 
-The code was developed with Python 3.8-era Open3DSOT dependencies and PyTorch/PyTorch Lightning. A CUDA-capable GPU is expected for practical attack runs.
+The local experiments were run from a `uv`-managed virtual environment. A CUDA-capable GPU is expected for practical attack runs.
 
-Recommended setup:
+Recommended setup with `uv`:
 
 ```bash
-conda create -n 3dtrack-attack python=3.8 -y
-conda activate 3dtrack-attack
+# Install uv if it is not available yet.
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Install a PyTorch build matching your CUDA driver.
-# Example used by the original Open3DSOT release:
-conda install pytorch==1.7.1 torchvision==0.8.2 torchaudio==0.7.2 cudatoolkit=11.0 -c pytorch
+# From the repository root:
+cd /path/to/3dtrack-attack
+uv venv .venv --python 3.8
+source .venv/bin/activate
 
 cd Open3DSOT
-pip install -r requirement.txt
+uv pip install -r requirement.txt
 ```
 
-If the PointNet++ op from `requirement.txt` fails to install from GitHub, build the vendored source:
+Install a PyTorch build that matches your CUDA driver before or after the requirements step if your environment does not already provide one. For example, choose the correct command from the PyTorch installation selector for your CUDA version, then install the remaining requirements with `uv pip install -r requirement.txt`.
+
+If the PointNet++ op from `requirement.txt` fails to install from GitHub, build the vendored source inside the same `uv` environment:
 
 ```bash
-cd Open3DSOT/Pointnet2_PyTorch/pointnet2_ops_lib
-pip install -e .
+cd /path/to/3dtrack-attack/Open3DSOT/Pointnet2_PyTorch/pointnet2_ops_lib
+uv pip install -e .
 ```
 
-Then return to the project root for all commands:
+Then return to the project root for all experiment commands:
 
 ```bash
 cd /path/to/3dtrack-attack/Open3DSOT
 ```
+
+Conda can also work, but the documented/reproduced setup for this workspace is the `uv` environment above.
 
 ## Data And Checkpoints
 
